@@ -37,8 +37,8 @@ sudo mkdir -p /srv/astrometry-worker
 sudo chown -R $USER:$USER /srv/astrometry-worker
 cd /srv/astrometry-worker
 
-# Clone your repo here (replace with your URL)
-git clone https://github.com/<your-org>/<your-repo>.git .
+# Clone your repo here
+git clone https://github.com/JulienPrd/astrometry-worker
 
 # Python env
 python3 -m venv venv
