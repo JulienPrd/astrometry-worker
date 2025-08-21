@@ -1,86 +1,92 @@
-# astro_jobs_cli.py — Standalone Async Job Runner
+# Astro Jobs CLI — Async Astrometry Data Extraction using Astrometry.net
 
-This repository contains a minimal standalone job runner that wraps your existing `astro_extract.py` script. It allows you to submit image analysis jobs, check their status, and fetch results — all without running a dedicated API or Celery worker. It is designed to be invoked **from another backend** (e.g., via `subprocess`).
+This project provides a **standalone asynchronous job runner** for astrometric image analysis. It wraps your existing `astro_extract.py` (which calls `astrometry.net`’s `solve-field`, extracts EXIF/FITS metadata, RA/Dec, FOV, pixel scale, orientation, and detected objects) into a simple job system that can be triggered by any backend.
 
-## Features
-- **Asynchronous execution**: `submit` launches the analysis in the background and immediately returns a `job_id`.
-- **Persistent state**: Each job is stored under `$JOBS_DIR/<job_id>/` with subfolders for inputs, outputs, logs, and JSON metadata.
-- **Status tracking**: Query a job to see if it’s `queued`, `processing`, `done`, or `error`.
-- **Result retrieval**: Fetch the JSON output produced by `astro_extract.py`.
-- **No external services required**: Jobs are executed as detached OS processes.
+## Purpose
+- Automate **astrometric solving** of images (JPG/PNG/FITS).
+- Extract metadata (EXIF, FITS headers, GPS, camera/telescope info).
+- Run `solve-field` to compute **RA/Dec center, field of view, pixel scale, orientation**.
+- Parse identified **catalog objects**, sorted by distance to the image center.
+- Store the results as **JSON** retrievable by job ID.
 
-## Requirements
-- Python 3.9+
-- Dependencies required by `astro_extract.py` (e.g., `astrometry.net`, `exiftool`, `astropy`, `Pillow`).
+## How it Works
+- You call the CLI with `submit` → it creates a **job**, copies the image, and spawns a background process.
+- The background worker runs `astro_extract.py` and writes logs, status, and results.
+- You can later query the job state (`status`) or fetch the JSON output (`result`).
 
-## Environment Variables
-- **`JOBS_DIR`**: Path where jobs are stored (default: `/srv/astro_jobs`).
-- **`ASTRO_EXTRACT_BIN`**: Path to your `astro_extract.py` script (default: `./astro_extract.py` in the current directory).
+## Why Jobs?
+Astrometric solving can take **minutes** depending on image size and catalog indexes. Instead of blocking, each analysis runs asynchronously and persists results in a structured job folder.
 
-## CLI Usage
-### Submit a new job
+## Environment
+- **JOBS_DIR** (default: `/srv/astro_jobs`) → Root folder for jobs.
+- **ASTRO_EXTRACT_BIN** (default: `./astro_extract.py`) → Path to the astrometry extraction script.
+
+## Workflow
+1. **Submit a job**
 ```bash
-python3 astro_jobs_cli.py submit --image /path/to/image.jpg \
-    --scale-low 1 --scale-high 3 --downsample 2 --timeout 600
-# → {"ok": true, "job_id": "a1b2c3..."}
+python3 astro_jobs_cli.py submit --image /path/to/image.jpg --scale-low 1 --scale-high 3
+# → {"ok": true, "job_id": "abc123..."}
 ```
 
-### Check job status
+2. **Check status**
 ```bash
-python3 astro_jobs_cli.py status --job-id a1b2c3...
-# → { "ok": true, "job_id": "...", "state": "processing", ... }
+python3 astro_jobs_cli.py status --job-id abc123
+# → { "job_id": "abc123", "state": "processing", ... }
 ```
 
-### Fetch job result
+3. **Retrieve result**
 ```bash
-python3 astro_jobs_cli.py result --job-id a1b2c3...
-# → JSON output from astro_extract.py (if ready)
+python3 astro_jobs_cli.py result --job-id abc123
+# → JSON with metadata + astrometry solution + objects[]
 ```
 
-## Job Folder Structure
-Each job is stored under `$JOBS_DIR/<job_id>/` with the following contents:
+## Job Storage Layout
 ```
 <job_id>/
- ├── input/        # Uploaded input image
- ├── output/       # result.json (final output)
- ├── status.json   # Job state metadata
- └── task.log      # Stdout/stderr of astro_extract.py
+ ├── input/        # Original uploaded image
+ ├── output/       # result.json (astrometry data)
+ ├── status.json   # Current state, params, timestamps
+ └── task.log      # Full stdout/stderr from astro_extract.py
 ```
 
 ## States
-- **queued** → job created, worker process started
-- **processing** → astro_extract.py is running
-- **done** → analysis complete, JSON available in `output/result.json`
-- **error** → failure, see `task.log` and `status.json`
+- **queued** → job created, worker spawned
+- **processing** → astrometry running
+- **done** → result.json available
+- **error** → failure (details in task.log)
 
-## Integration Example (Python)
-If your backend is written in Python, you can call the CLI with `subprocess`:
-```python
-import subprocess, json
+## Integration
+- **Backend usage**: call `astro_jobs_cli.py submit` from your API, store the `job_id`, then poll `status` and fetch `result`.
+- **Result**: final structured JSON includes EXIF/FITS capture metadata and astrometric solution (RA/Dec, FOV, orientation, objects sorted by proximity).
 
-# Submit a job
-out = subprocess.check_output([
-    "python3", "astro_jobs_cli.py", "submit", "--image", "/tmp/img.jpg"
-])
-job_id = json.loads(out)["job_id"]
-
-# Poll status
-status = subprocess.check_output([
-    "python3", "astro_jobs_cli.py", "status", "--job-id", job_id
-])
-print(status.decode())
-
-# Fetch result
-result = subprocess.check_output([
-    "python3", "astro_jobs_cli.py", "result", "--job-id", job_id
-])
-print(result.decode())
+## Example Output (simplified)
+```json
+{
+  "ok": true,
+  "filename": "IMG_0132.jpg",
+  "capture": {
+    "datetime": "2024-08-21T23:45:00",
+    "camera_model": "Canon EOS",
+    "gps": {"lat": 43.5, "lon": 5.4}
+  },
+  "astrometry": {
+    "ra_center": 312.3,
+    "dec_center": 45.2,
+    "fov_deg": [1.2, 0.8],
+    "pixscale_arcsec": 2.1,
+    "orientation_deg": 178.9,
+    "objects": [
+      {"name": "Crescent Nebula", "catalog": "NGC", "id": "6888", "sep_arcmin": 2.3},
+      {"name": "Star HD12345", "sep_arcmin": 5.1}
+    ]
+  }
+}
 ```
 
-## Notes
-- Logs from each run are written to `task.log` inside the job folder.
-- You can implement a cleanup routine to prune old jobs.
-- If desired, add a `cancel` feature using PID tracking and signals.
+## Summary
+This tool turns **astrometric solving** into a reliable, asynchronous job system:
+- Submit → Process → Poll → Retrieve JSON.
+- Suitable for integration into any backend API.
+- Keeps analysis isolated per job with logs and persistent outputs.
 
----
-This tool makes it easy to integrate heavy astrometric image analysis into an existing backend, without the overhead of managing an additional API or queue system.
+It is the simplest way to convert raw astrophotography images into **structured astrometry data** consumable by applications.
